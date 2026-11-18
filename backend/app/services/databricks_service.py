@@ -94,13 +94,16 @@ class ThreadSafeOAuthPersistence(OAuthPersistence):
 # Module-level singletons shared safely across all FastAPI worker threads
 _oauth_persistence = ThreadSafeOAuthPersistence(OAUTH_TOKEN_CACHE_PATH)
 _sql_lock = threading.RLock()
+_sdk_lock = threading.RLock()
 _shared_connection = None
 _shared_connection_key: Optional[tuple] = None
+_shared_workspace_client = None
+_shared_workspace_key: Optional[tuple] = None
 
 
 def close_shared_connection() -> None:
-    """Safely closes the shared Databricks SQL Warehouse connection."""
-    global _shared_connection, _shared_connection_key
+    """Safely closes the shared Databricks SQL Warehouse connection and clears cached SDK client."""
+    global _shared_connection, _shared_connection_key, _shared_workspace_client, _shared_workspace_key
     with _sql_lock:
         if _shared_connection is not None:
             try:
@@ -109,6 +112,9 @@ def close_shared_connection() -> None:
                 pass
             _shared_connection = None
             _shared_connection_key = None
+    with _sdk_lock:
+        _shared_workspace_client = None
+        _shared_workspace_key = None
 
 
 atexit.register(close_shared_connection)
@@ -174,7 +180,7 @@ def _format_duration_ms(start_ms: Optional[int], end_ms: Optional[int]) -> Optio
 
 
 def _map_run_status(life_cycle_state: Optional[str], result_state: Optional[str]) -> str:
-    """Maps Databricks job life_cycle_state + result_state into a clear UI status."""
+    """Maps Databricks job life_cycle_state + result_state into clear real statuses."""
     lc = (life_cycle_state or "").upper()
     rs = (result_state or "").upper()
 
@@ -184,12 +190,12 @@ def _map_run_status(life_cycle_state: Optional[str], result_state: Optional[str]
         return "RUNNING"
     if lc == "TERMINATED":
         if rs == "SUCCESS":
-            return "COMPLETED"
+            return "SUCCESS"
         if rs in ("FAILED", "TIMEDOUT"):
             return "FAILED"
         if rs == "CANCELED":
             return "CANCELED"
-        return rs or "COMPLETED"
+        return rs or "SUCCESS"
     if lc in ("INTERNAL_ERROR", "SKIPPED"):
         return "FAILED"
     return lc or "UNKNOWN"
@@ -259,21 +265,48 @@ class DatabricksService:
     """Handles SQL Warehouse queries, Unity Catalog Volume uploads, and Jobs API calls."""
 
     def _get_workspace_client(self, action_name: str):
+        """
+        Returns a thread-safe cached Databricks SDK WorkspaceClient.
+        - Uses PAT (DATABRICKS_TOKEN) if configured in backend/.env.
+        - Otherwise uses Databricks SDK OAuth U2M (`external-browser`) with automatic
+          disk token caching (~/.databricks/token-cache.json) — no PAT required!
+        """
+        global _shared_workspace_client, _shared_workspace_key
+
         if not settings.workspace_url:
             raise DatabricksConfigError(
                 f"{action_name} requires DATABRICKS_SERVER_HOSTNAME in backend/.env."
             )
-        if not settings.has_pat_token:
-            raise DatabricksConfigError(
-                f"{action_name} requires a Databricks Personal Access Token (DATABRICKS_TOKEN) "
-                "in backend/.env. SQL Warehouse queries support browser OAuth, whereas automated "
-                "Volume uploads and Jobs API calls require a PAT."
-            )
-        from databricks.sdk import WorkspaceClient
-        return WorkspaceClient(
-            host=settings.workspace_url,
-            token=settings.DATABRICKS_TOKEN.strip(),
-        )
+
+        client_key = (settings.workspace_url, settings.jobs_auth_mode)
+        with _sdk_lock:
+            if _shared_workspace_client is not None and _shared_workspace_key == client_key:
+                return _shared_workspace_client
+
+            from databricks.sdk import WorkspaceClient
+
+            if settings.has_pat_token:
+                logger.info("Initializing Databricks SDK WorkspaceClient using PAT authentication.")
+                client = WorkspaceClient(
+                    host=settings.workspace_url,
+                    token=settings.DATABRICKS_TOKEN.strip(),
+                )
+            else:
+                # Hold _sql_lock during initial SDK external-browser handshake so port 8020
+                # cannot collide with SQL Warehouse OAuth initialization.
+                with _sql_lock:
+                    logger.info(
+                        "Initializing Databricks SDK WorkspaceClient using OAuth (external-browser) for %s.",
+                        action_name,
+                    )
+                    client = WorkspaceClient(
+                        host=settings.workspace_url,
+                        auth_type="external-browser",
+                    )
+
+            _shared_workspace_client = client
+            _shared_workspace_key = client_key
+            return client
 
     def test_connection(self) -> Dict[str, Any]:
         """Tests live Databricks SQL Warehouse connectivity with SELECT 1."""
@@ -329,22 +362,35 @@ class DatabricksService:
 
         client = self._get_workspace_client("Databricks Jobs API")
         job_id_int = int(settings.DATABRICKS_JOB_ID.strip())
+        has_custom_file = bool(file_name or volume_path)
         resolved_file = _sanitize_filename(
             file_name or (os.path.basename(volume_path) if volume_path else "sample_sales.csv")
         )
 
         try:
-            waiter = client.jobs.run_now(
-                job_id=job_id_int,
-                job_parameters={
-                    "catalog_name": settings.DATABRICKS_CATALOG,
-                    "schema_name": settings.DATABRICKS_SCHEMA,
-                    "volume_name": settings.DATABRICKS_VOLUME,
-                    "file_name": resolved_file,
-                },
-            )
+            if has_custom_file:
+                try:
+                    waiter = client.jobs.run_now(
+                        job_id=job_id_int,
+                        job_parameters={
+                            "catalog_name": settings.DATABRICKS_CATALOG,
+                            "schema_name": settings.DATABRICKS_SCHEMA,
+                            "volume_name": settings.DATABRICKS_VOLUME,
+                            "file_name": resolved_file,
+                        },
+                    )
+                except Exception as param_err:
+                    # Existing Serverless jobs without declared job_parameters run cleanly with run_now(job_id=...)
+                    if "parameter" in str(param_err).lower():
+                        logger.info("Job %s does not declare job_parameters; triggering with default task config.", job_id_int)
+                        waiter = client.jobs.run_now(job_id=job_id_int)
+                    else:
+                        raise
+            else:
+                waiter = client.jobs.run_now(job_id=job_id_int)
+
             run_id = str(waiter.run_id)
-            run_url = f"{settings.workspace_url}/#job/{job_id_int}/run/{run_id}"
+            run_url = f"{settings.workspace_url}/jobs/{job_id_int}/runs/{run_id}"
             return {
                 "success": True,
                 "runId": run_id,
@@ -354,19 +400,34 @@ class DatabricksService:
                 "message": f"Databricks Job {job_id_int} triggered successfully (Run ID: {run_id}).",
                 "runPageUrl": run_url,
             }
+        except DatabricksError:
+            raise
         except Exception as e:
             logger.error("Failed to trigger Databricks Job %s: %s", job_id_int, str(e))
             raise DatabricksError(f"Failed to trigger Databricks Job: {str(e)}") from e
 
     def get_job_status(self, run_id: str) -> Dict[str, Any]:
         """Fetches genuine run status, timing, and logs from Databricks Jobs API."""
-        if not str(run_id).strip().isdigit():
+        raw_id = str(run_id).strip()
+        if not raw_id.isdigit():
             raise DatabricksConfigError(
-                f"Invalid Databricks run_id '{run_id}'. Expected a numeric Databricks run ID."
+                f"Invalid Databricks run_id '{run_id}'. Expected a numeric Databricks Run ID."
             )
 
         client = self._get_workspace_client("Databricks Job Status check")
-        run_id_int = int(str(run_id).strip())
+        run_id_int = int(raw_id)
+        extra_note: Optional[str] = None
+
+        # Helpful safeguard: if the user entered their Job ID instead of a Run ID,
+        # automatically look up the latest run for that Job ID.
+        if settings.has_job_id and raw_id == settings.DATABRICKS_JOB_ID.strip():
+            latest_runs = list(client.jobs.list_runs(job_id=run_id_int, limit=1))
+            if not latest_runs:
+                raise DatabricksError(
+                    f"Job ID {run_id_int} has no runs yet. Click 'Trigger Databricks Job' first."
+                )
+            run_id_int = int(latest_runs[0].run_id)
+            extra_note = f"[INFO] Resolved Job ID {raw_id} to its latest Run ID: {run_id_int}"
 
         try:
             run = client.jobs.get_run(run_id=run_id_int)
@@ -376,10 +437,13 @@ class DatabricksService:
             state_msg = state.state_message if state else None
             mapped_status = _map_run_status(lc_state, res_state)
 
-            logs: List[str] = [
-                f"[DATABRICKS] Run ID: {run_id_int}",
+            logs: List[str] = []
+            if extra_note:
+                logs.append(extra_note)
+            logs.extend([
+                f"[DATABRICKS] Run ID: {run_id_int} | Job ID: {run.job_id or '-'}",
                 f"[STATE] Life Cycle: {lc_state or 'UNKNOWN'} | Result: {res_state or 'IN_PROGRESS'}",
-            ]
+            ])
             if state_msg:
                 logs.append(f"[MESSAGE] {state_msg}")
 
@@ -388,6 +452,8 @@ class DatabricksService:
                     t_lc = t.state.life_cycle_state.value if (t.state and t.state.life_cycle_state) else "UNKNOWN"
                     t_rs = t.state.result_state.value if (t.state and t.state.result_state) else "-"
                     logs.append(f"[TASK] {t.task_key}: {t_lc} ({t_rs})")
+                    if t.state and t.state.state_message:
+                        logs.append(f"[TASK MSG] {t.state.state_message}")
                     if t.run_id and t_lc == "TERMINATED":
                         try:
                             out = client.jobs.get_run_output(run_id=t.run_id)
@@ -395,6 +461,8 @@ class DatabricksService:
                                 logs.append(f"[OUTPUT] {out.notebook_output.result}")
                             if out.error:
                                 logs.append(f"[ERROR] {out.error}")
+                            if out.error_trace and mapped_status == "FAILED":
+                                logs.append(f"[TRACE] {out.error_trace[:500]}")
                         except Exception:
                             pass
 

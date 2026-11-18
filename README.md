@@ -124,12 +124,15 @@ DATABRICKS_HOST=https://your-workspace-id.cloud.databricks.com
 DATABRICKS_WAREHOUSE_ID=your_sql_warehouse_id
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your_sql_warehouse_id
 
-# Leave empty to use browser OAuth for SQL Warehouse queries,
-# OR add a Personal Access Token (PAT) to enable Volume Upload & Jobs API.
+# Authentication (OAuth-First with Optional PAT Fallback):
+# - Leave DATABRICKS_TOKEN empty to use browser OAuth for BOTH:
+#     1) SQL Warehouse queries (`databricks-oauth`)
+#     2) Databricks Jobs API & Volume Uploads (`external-browser` via Databricks SDK)
+# - Or set DATABRICKS_TOKEN=dapi... to use a Personal Access Token (PAT) without browser sign-in.
 DATABRICKS_TOKEN=
 
-# Optional numeric Databricks Job ID for automated PySpark ETL triggering
-DATABRICKS_JOB_ID=
+# Numeric Databricks Job ID for sales_etl_pipeline (e.g., 201788031701853)
+DATABRICKS_JOB_ID=your_databricks_job_id
 
 DATABRICKS_CATALOG=mypyspark
 DATABRICKS_SCHEMA=sales_schema
@@ -138,6 +141,8 @@ DATABRICKS_VOLUME=sales_volume
 PORT=8000
 ENVIRONMENT=development
 ```
+
+> **How `.env` loading works:** `backend/app/config/settings.py` resolves `backend/.env` using an absolute path (`Path(__file__).resolve().parents[2] / ".env"`), so it loads reliably regardless of which folder you launch `uvicorn` from. After updating `backend/.env`, restart `uvicorn` and verify `GET http://localhost:8000/api/health` shows `job_id_configured: true` and `jobs_api_ready: true`.
 
 See [`databricks/README.md`](databricks/README.md) for step-by-step Databricks setup instructions.
 

@@ -6,13 +6,18 @@ class HealthResponse(BaseModel):
     status: str
     backend_connected: bool
     databricks_connected: bool
+    sql_warehouse_connected: bool
     auth_mode: str
+    sql_auth_mode: str
+    jobs_api_auth_mode: str
+    jobs_api_ready: bool
     workspace: Optional[str] = None
     catalog: str
     schema_name: str
     volume: str
     pat_configured: bool
     job_id_configured: bool
+    job_id: Optional[str] = None
     message: str
     timestamp: str
 
@@ -26,6 +31,7 @@ class ConfigStatusResponse(BaseModel):
     volume: str
     volume_path: str
     auth_mode: str
+    jobs_auth_mode: str
     pat_configured: bool
     job_id_configured: bool
     job_id: Optional[str] = None

@@ -159,10 +159,13 @@ def test_live_http_endpoints():
         assert_eq(len(explorer["records"]), 5, "Page size respected")
         assert all(r["category"] == "Electronics" for r in explorer["records"])
 
-        # 5. Honest error handling for unconfigured Jobs API / PAT (NO fake success!)
-        st, err_proc = http_json(f"{base}/api/process", method="POST", data=b"{}", headers={"Content-Type": "application/json"})
-        assert_eq(st, 503, "POST /api/process without Job ID returns honest 503")
-        assert "DATABRICKS_JOB_ID" in err_proc["detail"]
+        # 5. Verify separate health diagnostics & Jobs API validation
+        st, health_diag = http_json(f"{base}/api/health?check_databricks=false")
+        assert_eq(st, 200, "GET /api/health diagnostics")
+        assert_eq(health_diag["job_id_configured"], True, "DATABRICKS_JOB_ID detected from backend/.env")
+        assert_eq(health_diag["job_id"], "201788031701853", "Exact Job ID loaded")
+        assert_eq(health_diag["jobs_api_ready"], True, "Jobs API ready with OAuth/PAT")
+        assert health_diag["jobs_api_auth_mode"] in ("external-browser", "pat")
 
         st, err_job = http_json(f"{base}/api/jobs/not-a-number")
         assert_eq(st, 400, "GET /api/jobs/not-a-number returns honest 400")
@@ -186,17 +189,7 @@ def test_live_http_endpoints():
         assert_eq(val_resp["totalRows"], 82, "Upload validate totalRows")
         assert_eq(val_resp["duplicateOrderIds"], 2, "Upload validate duplicates")
 
-        # Upload to Volume without PAT must fail honestly with 503 (never fake success!)
-        st, up_resp = http_json(
-            f"{base}/api/upload",
-            method="POST",
-            data=multipart_body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        )
-        assert_eq(st, 503, "POST /api/upload without PAT returns honest 503")
-        assert "DATABRICKS_TOKEN" in up_resp["detail"]
-
-        print("[PASS] All 14 live HTTP endpoint & error-handling tests passed!")
+        print("[PASS] All live HTTP endpoint, health diagnostic & validation tests passed!")
     finally:
         proc.terminate()
         try:

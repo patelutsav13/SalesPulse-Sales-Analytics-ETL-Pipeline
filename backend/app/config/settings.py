@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     def auth_mode(self) -> str:
         return "pat" if self.has_pat_token else "databricks-oauth"
 
+    @property
+    def jobs_auth_mode(self) -> str:
+        return "pat" if self.has_pat_token else "external-browser"
+
     def safe_public_config(self) -> Dict[str, Any]:
         """Returns non-secret configuration values safe to show in the UI."""
         return {
@@ -92,9 +96,10 @@ class Settings(BaseSettings):
             "volume": self.DATABRICKS_VOLUME,
             "volume_path": f"/Volumes/{self.DATABRICKS_CATALOG}/{self.DATABRICKS_SCHEMA}/{self.DATABRICKS_VOLUME}/",
             "auth_mode": self.auth_mode,
+            "jobs_auth_mode": self.jobs_auth_mode,
             "pat_configured": self.has_pat_token,
             "job_id_configured": self.has_job_id,
-            "job_id": self.DATABRICKS_JOB_ID if self.has_job_id else None,
+            "job_id": self.DATABRICKS_JOB_ID.strip() if self.has_job_id else None,
             "sql_configured": self.has_sql_config,
         }
 

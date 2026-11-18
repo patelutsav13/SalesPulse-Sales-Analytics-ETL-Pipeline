@@ -41,30 +41,46 @@ export default function DataProcessingPage() {
     try {
       setLoading(true);
       setError('');
-      const targetId = explicitRunId !== undefined ? explicitRunId : runIdInput;
+      const targetId = explicitRunId !== undefined ? explicitRunId : getLastRunId();
 
       if (targetId && /^\d+$/.test(String(targetId).trim())) {
         const statusData = await getJobRunStatus(String(targetId).trim());
         setActiveJob(statusData);
+        if (statusData?.runId) {
+          setRunIdInput(statusData.runId);
+          setLastRunId(statusData.runId);
+        }
       }
 
       const runs = await fetchRecentJobs(5);
       setRecentJobs(runs || []);
       if (!targetId && runs && runs.length > 0) {
-        setActiveJob(runs[0]);
-        setRunIdInput(runs[0].runId);
-        setLastRunId(runs[0].runId);
+        const latestDetailed = await getJobRunStatus(runs[0].runId);
+        setActiveJob(latestDetailed);
+        setRunIdInput(latestDetailed.runId);
+        setLastRunId(latestDetailed.runId);
       }
     } catch (err) {
       setError(extractErrorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, [runIdInput]);
+  }, []);
 
   useEffect(() => {
     loadJobData();
   }, [loadJobData]);
+
+  // Auto-poll every 5 seconds while the active Databricks job is PENDING or RUNNING
+  useEffect(() => {
+    if (!activeJob || !['PENDING', 'RUNNING'].includes((activeJob.status || '').toUpperCase())) {
+      return;
+    }
+    const timer = setInterval(() => {
+      loadJobData(activeJob.runId);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [activeJob, loadJobData]);
 
   const handleLookupSubmit = (e) => {
     e.preventDefault();
@@ -163,7 +179,7 @@ export default function DataProcessingPage() {
               <h3 className="text-sm font-bold text-amber-900">Databricks Jobs API Status</h3>
               <p className="text-xs text-amber-900/90 leading-relaxed">{error}</p>
               <p className="text-xs text-amber-800 pt-1">
-                <strong>How to enable live Job triggering &amp; monitoring:</strong> Add <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">DATABRICKS_TOKEN</code> (PAT) and <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">DATABRICKS_JOB_ID</code> to <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">backend/.env</code> and restart FastAPI.
+                <strong>Authentication:</strong> Databricks Jobs API uses browser OAuth (<code className="font-mono bg-amber-100 px-1 py-0.5 rounded">external-browser</code>) automatically when <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">DATABRICKS_JOB_ID</code> is set in <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">backend/.env</code> (or uses <code className="font-mono bg-amber-100 px-1 py-0.5 rounded">DATABRICKS_TOKEN</code> PAT fallback if configured).
               </p>
             </div>
           </div>
