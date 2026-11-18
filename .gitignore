@@ -1,0 +1,41 @@
+# Environment & Secrets (NEVER commit secrets!)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+.databrickscfg
+.databricks_oauth_token.json
+*.oauth_token.json
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.vite/
+npm-debug.log*
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+backend/venv/
+env/
+ENV/
+.pytest_cache/
+
+# Databricks local cache
+.databricks/
+
+# IDE, OS & temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
